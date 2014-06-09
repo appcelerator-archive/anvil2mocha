@@ -8,9 +8,12 @@ var path = require('path'),
 	colors = require('colors'),
 	wrench = require('wrench'),
 	fs = require('fs-extra'),
-	Uglify = require('uglify-js');
+	Uglify = require('uglify-js'),
+	longjohn = require('longjohn');
 
 var EXCLUDE_DIRS = ['.DS_Store','.git','.svn','CVS','RCS','SCCS'];
+
+longjohn.async_trace_limit = -1;
 
 /**
  * returns true if file path is a directory
@@ -72,12 +75,24 @@ function parse(source, filename) {
 		if (node instanceof Uglify.AST_Call) {
 			if (node.start.value === 'valueOf') {
 				node.expression.name = node.start.value = node.expression.thedef.name = 'should';
-				var newnode = new Uglify.AST_Call({
-					expression: node.expression,
-					args: [
-						node.args[1]
-					]
-				});
+				if (node.args.length<2) {
+					//NOTE: some tests have bugs in them like
+					//suites/ui_textArea.js line 130 (missing testRun first argument)
+					var newnode = new Uglify.AST_Call({
+						expression: node.expression,
+						args: [
+							node.args[0]
+						]
+					});
+				}
+				else {
+					var newnode = new Uglify.AST_Call({
+						expression: node.expression,
+						args: [
+							node.args[1]
+						]
+					});
+				}
 				return newnode;
 			}
 			else if (node.start.value === 'should') {
@@ -87,8 +102,9 @@ function parse(source, filename) {
 				});
 				var property,
 					call,
-					not = node.expression.property.indexOf('Not') > 0;
-				switch (node.expression.property) {
+					name = node.expression.property,
+					not = name.indexOf('Not') > 0;
+				switch (name) {
 					case 'shouldNotBeFalse':
 					case 'shouldBeFalse': {
 						property = 'false';
@@ -166,8 +182,37 @@ function parse(source, filename) {
 						call = true;
 						break;
 					}
+					case 'shouldBeGreaterThanEqual': {
+						property = 'within';
+						call = true;
+						node.args.push(new Uglify.AST_Infinity());
+						break;
+					}
+					case 'shouldBeLessThanEqual': {
+						property = 'within';
+						call = true;
+						node.args.push(new Uglify.AST_Atom({value:-Infinity}));
+						break;
+					}
+					case 'shouldBeOneOf':
+					case 'shouldContain': {
+						property = 'containEql';
+						call = true;
+						break;
+					}
+					case 'shouldMatchArray': {
+						property = 'equal';
+						call = true;
+						break;
+					}
+					case 'shouldBeZero': {
+						property = 'equal';
+						node.args.push(new Uglify.AST_Number({value:'0'}));
+						call = true;
+						break;
+					}
 					default: {
-						console.log('UNKNOWN SHOULD=>',node.print_to_string());
+						console.log('UNKNOWN SHOULD=>',name,node.print_to_string(),node.start);
 						process.exit(1);
 					}
 				}
@@ -205,6 +250,14 @@ function parse(source, filename) {
 			}
 			return;
 		}
+		else if (node instanceof Uglify.AST_If) {
+			if (node.body && node.body.body && node.body.body[0] && 
+				node.body.body[0].body && node.body.body[0].body.body && 
+				node.body.body[0].body.body.length==0) {
+				// remove our empty conditionals
+				return new Uglify.AST_EmptyStatement();
+			}
+		}
 		else if (node instanceof Uglify.AST_Assign) {
 			if (node.start.value==='this' && node.operator === '=') {
 				switch (node.left.property){
@@ -216,22 +269,45 @@ function parse(source, filename) {
 						return new Uglify.AST_EmptyStatement();
 					}
 					case 'tests': {
-						node.right.elements.forEach(function(element){
-							var timeout = -1;
-							if (element.properties.length>1) {
-								timeout = element.properties[1].value.value;
+						function addTests(elements, if_cond) {
+							elements.forEach(function(element){
+								var timeout = -1;
+								if (element.properties.length>1) {
+									timeout = element.properties[1].value.value;
+								}
+								testNames[element.properties[0].value.value]={timeout:timeout,cond:if_cond};
+							});
+						}
+						if (!node.right.elements) {
+							// if (Ti.Platform.osname === 'android') {
+							// 	this.tests = this.tests.concat([
+							// 		{name: "nullArrayTest"}
+							// 	]);
+							// }
+							if (node.right instanceof Uglify.AST_Call) {
+								// appending tests
+								if (node.right.expression && node.right.expression.property==='concat') {
+									// see if we have a conditional
+									if_cond = transformer.find_parent(Uglify.AST_If);
+									addTests(node.right.args[0].elements,if_cond && if_cond.condition);
+									return new Uglify.AST_BlockStatement({
+										body: []
+									});
+								}
 							}
-							testNames[element.properties[0].value.value]=timeout;
-						});
+						}
+						else {
+							addTests(node.right.elements);
+						}
 						return new Uglify.AST_EmptyStatement();
 					}
 					default: {
 						var name = node.left.property,
 							found = testNames[name];
-						if (typeof found === 'number') {
-							if (found > 0) {
+						if (found) {
+							if (found.timeout > 0) {
 								// add the timeout if specified
-								var n = Uglify.parse("this.timeout("+found+")");
+								var n = Uglify.parse("this.timeout("+found.timeout+")");
 								node.right.body.unshift(n);
 							}
 							node.right.argnames[0].name = node.right.argnames[0].thedef.name = 'finish';
@@ -244,11 +320,15 @@ function parse(source, filename) {
 									node.right
 								]
 							});
+							if (found.cond) {
+								var expr = '('+found.cond.print_to_string()+'?it:it.skip)'+newnode.print_to_string().substring(2);
+								return Uglify.parse(expr);
+							}
 							return newnode;
 						}
 						else {
-							console.error('Test case not found',name);
-							process.exit(1);
+							// this is OK, just not a test case accessor
+							return;
 						}
 						break;
 					}
@@ -313,6 +393,7 @@ function parse(source, filename) {
 	result.figure_out_scope();
 	result = result.transform(compressor);
 	result.print(stream);
+
 
 	return stream.toString();
 }
