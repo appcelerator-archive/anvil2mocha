@@ -1,0 +1,29 @@
+{
+  "name": "anvil2mocha",
+  "version": "0.1.0",
+  "description": "Anvil test case to ti-mocha test case converter",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:appcelerator/anvil2mocha.git"
+  },
+  "keywords": [
+    "titanium",
+    "anvil",
+    "tio2",
+    "mocha"
+  ],
+  "author": "Jeff Haynie",
+  "license": "Apache-2",
+  "bugs": {
+    "url": "https://github.com/appcelerator/anvil2mocha/issues"
+  },
+  "bin": "./bin/anvil2mocha",
+  "dependencies": {
+    "uglify-js": "~2.4.13",
+    "colors": "~0.6.2",
+    "wrench": "~1.5.8",
+    "fs-extra": "~0.9.1"
+  },
+  "devDependencies": {}
+}
